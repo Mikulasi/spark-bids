@@ -1,4 +1,5 @@
 
+
 object Bids extends Config{
   def main(args: Array[String]): Unit = {
     val file = sc.textFile("./resources/bids.txt")

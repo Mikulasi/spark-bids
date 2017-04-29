@@ -1,6 +1,6 @@
-import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.errors
+import org.apache.spark.{SparkConf, SparkContext}
+
 
 object Motels {
   val ERRONEOUS_DIR: String = "erroneous"
@@ -14,7 +14,7 @@ object Motels {
     val exchangeRatesPath = args(2)
     val outputBasePath = args(3)
 
-    val sc = new SparkContext(new SparkConf().setAppName("motels-home-recommendation"))
+    val sc = new SparkContext(new SparkConf().setAppName("motels-home-recommendation").setMaster("local[2]"))
 
     processData(sc, bidsPath, motelsPath, exchangeRatesPath, outputBasePath)
 
@@ -42,7 +42,7 @@ object Motels {
       * Read the exchange rate information.
       * Hint: You will need a mapping between a date/time and rate
       */
-    val exchangeRates: Map[String, Double] = getExchangeRates(sc, exchangeRatesPath)
+    val exchangeRates: collection.Map[String, Double] = getExchangeRates(sc, exchangeRatesPath)
 
     /**
       * Task 3:
@@ -71,29 +71,54 @@ object Motels {
   }
 
   def getRawBids(sc: SparkContext, bidsPath: String): RDD[List[String]] = {
-    val file = sc.textFile("./resources/bids.txt")
-    val list: Unit = file.collect().foreach(line => println(line))
+    val file = sc.textFile(bidsPath)
+    val list = file.map(line => line.split(",").toList)
+    list.filter(_.size > 2)
   }
+
 
   def getErroneousRecords(rawBids: RDD[List[String]]): RDD[String] = {
-    for (raw <- rawBids) {
-      val filter = raw.filter(f => f.contains("ERROR"))
-    }
-    val error = filter.foreach((m) => m.map(m.substring(8), 1))
-    errors.foreach(line => println(line))
+    val filter = rawBids.filter(records => records(2).contains("ERROR"))
+    val errRecords = filter.map(err => ("%s,%s".format(err(1), err(2)), 1)).reduceByKey((a, b) => a + b)
+    errRecords.map(pairs => "%s,%d".format(pairs._1, pairs._2))
   }
 
-  def getExchangeRates(sc: SparkContext, exchangeRatesPath: String): Map[String, Double] = {
+  def getExchangeRates(sc: SparkContext, exchangeRatesPath: String): collection.Map[String, Double] = {
     val usdEur = 1.087
-    val file = sc.textFile("./resources/exchange_rate.txt")
-    val pairs = file.map(m => (m.split(",")(0), m.split(",")(3).toDouble * usdEur)).collectAsMap()
-
+    val file = sc.textFile(exchangeRatesPath).map(lines => lines.split(","))
+    val pairs = file.map(m => (m(0), m(3).toDouble * usdEur)).collectAsMap()
+    pairs
   }
 
-  def getBids(rawBids: RDD[List[String]], exchangeRates: Map[String, Double]): RDD[BidItem] = ???
+  def getBids(rawBids: RDD[List[String]], exchangeRates: collection.Map[String, Double]): RDD[BidItem] = {
+    val filter = rawBids.filter(records => !records(2).contains("ERROR"))
+    val bindBids = filter.flatMap(bid => List((bid.head, bid(1), "US", bid(5)), (bid.head, bid(1), "CA", bid(8)), (bid.head, bid(1), "MX", bid(6))))
+    val reduceBids = bindBids.map(b => (b._1, b._2, b._3, b._4.toDouble * exchangeRates.getOrElse(b._2, Double.NaN)))
+    val f = bindBids.map(line => BidItem(line._1, line._2, line._3, convertString(line._4)))
+    f
+  }
 
-  def getMotels(sc: SparkContext, motelsPath: String): RDD[(String, String)] = ???
+  def convertString(value: String): Double = {
+    try {
+      value.toDouble
+    } catch {
+      case _ : NumberFormatException => Double.NaN
+    }
+  }
 
-  def getEnriched(bids: RDD[BidItem], motels: RDD[(String, String)]): RDD[EnrichedItem] = ???
+  def getMotels(sc: SparkContext, motelsPath: String): RDD[(String, String)] = {
+    val path = sc.textFile(motelsPath)
+    val lines = path.map(r => r.split(","))
+    val field = lines.map(f => (f(0), f(1)))
+    field
+  }
 
+  def getEnriched(bids: RDD[BidItem], motels: RDD[(String, String)]): RDD[EnrichedItem] = {
+    val records = bids.map(b => (b.motelId, b)).join(motels.map(m => (m._1, m))).map(r => EnrichedItem(r._1, r._2._2._2, r._2._1.bidDate, r._2._1.loSa, r._2._1.price))
+    val filtered = records.map(m => (m.motelId, m.bidDate) -> m)
+    val reduce = filtered.reduceByKey((k, v) => if (k.price > v.price) k else v)
+    val getLast = reduce.map(number => number._2)
+    getLast
+
+  }
 }
